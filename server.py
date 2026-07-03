@@ -59,7 +59,38 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 HERMES_HOME = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
 ENV_FILE = Path(HERMES_HOME) / ".env"
-PAIRING_DIR = Path(HERMES_HOME) / "pairing"
+
+
+def _resolve_pairing_dir() -> Path:
+    """Locate the pairing store the same way hermes' get_hermes_dir() does.
+
+    hermes resolves ``PAIRING_DIR = get_hermes_dir("platforms/pairing", "pairing")``:
+    it honours the legacy ``$HERMES_HOME/pairing/`` ONLY when that dir has
+    content, otherwise it uses the consolidated ``platforms/pairing/``. The rule
+    changed in **v2026.7.1** — before it (v2026.6.19 and earlier) get_hermes_dir
+    used a bare ``old_path.exists()``, so an *empty* ``pairing/`` (which start.sh
+    used to seed on every boot) counted as "legacy in use" and both sides agreed
+    on ``pairing/``. v2026.7.1 switched to ``_legacy_path_has_content()``, which
+    ignores an empty stub (upstream #27602): the gateway now writes pending/
+    approved files to ``platforms/pairing/`` while a hard-coded ``pairing/`` here
+    would read the wrong (empty) dir — pending users vanish and approvals land
+    where the gateway never looks. We mirror the exact rule so this admin panel
+    and the gateway never split-brain: a *populated* legacy dir wins (preserves a
+    pre-v2026.7.1 deployment's approved users with no migration), else the new
+    consolidated path. Re-verify this against get_hermes_dir on the next bump.
+    """
+    legacy = Path(HERMES_HOME) / "pairing"
+    try:
+        if legacy.is_dir() and any(legacy.iterdir()):
+            return legacy
+    except OSError:
+        # Can't inspect (e.g. permissions) — assume occupied rather than risk
+        # orphaning legacy data, matching hermes' _legacy_path_has_content.
+        return legacy
+    return Path(HERMES_HOME) / "platforms" / "pairing"
+
+
+PAIRING_DIR = _resolve_pairing_dir()
 PAIRING_TTL = 3600
 
 # Native Hermes dashboard — runs on loopback, fronted by our reverse proxy.
