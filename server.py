@@ -59,7 +59,38 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 HERMES_HOME = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
 ENV_FILE = Path(HERMES_HOME) / ".env"
-PAIRING_DIR = Path(HERMES_HOME) / "pairing"
+
+
+def _resolve_pairing_dir() -> Path:
+    """Locate the pairing store the same way hermes' get_hermes_dir() does.
+
+    hermes resolves ``PAIRING_DIR = get_hermes_dir("platforms/pairing", "pairing")``:
+    it honours the legacy ``$HERMES_HOME/pairing/`` ONLY when that dir has
+    content, otherwise it uses the consolidated ``platforms/pairing/``. The rule
+    changed in **v2026.7.1** — before it (v2026.6.19 and earlier) get_hermes_dir
+    used a bare ``old_path.exists()``, so an *empty* ``pairing/`` (which start.sh
+    used to seed on every boot) counted as "legacy in use" and both sides agreed
+    on ``pairing/``. v2026.7.1 switched to ``_legacy_path_has_content()``, which
+    ignores an empty stub (upstream #27602): the gateway now writes pending/
+    approved files to ``platforms/pairing/`` while a hard-coded ``pairing/`` here
+    would read the wrong (empty) dir — pending users vanish and approvals land
+    where the gateway never looks. We mirror the exact rule so this admin panel
+    and the gateway never split-brain: a *populated* legacy dir wins (preserves a
+    pre-v2026.7.1 deployment's approved users with no migration), else the new
+    consolidated path. Re-verify this against get_hermes_dir on the next bump.
+    """
+    legacy = Path(HERMES_HOME) / "pairing"
+    try:
+        if legacy.is_dir() and any(legacy.iterdir()):
+            return legacy
+    except OSError:
+        # Can't inspect (e.g. permissions) — assume occupied rather than risk
+        # orphaning legacy data, matching hermes' _legacy_path_has_content.
+        return legacy
+    return Path(HERMES_HOME) / "platforms" / "pairing"
+
+
+PAIRING_DIR = _resolve_pairing_dir()
 PAIRING_TTL = 3600
 
 # Native Hermes dashboard — runs on loopback, fronted by our reverse proxy.
@@ -183,7 +214,7 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
-def write_config_yaml(data: dict[str, str]) -> None:
+def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> None:
     """Write config.yaml — deep-merge template defaults with any existing user/cron-managed sections.
 
     Previously this overwrote ``$HERMES_HOME/config.yaml`` with a hardcoded template
@@ -218,14 +249,35 @@ def write_config_yaml(data: dict[str, str]) -> None:
     merged = dict(existing)
 
     # Deployment-managed (always authoritative — these reflect the runtime env).
-    merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
-    merged_model["default"] = model
-    # Only force provider="auto" when a known API key is configured. If no
-    # API key is set, the user likely configured an OAuth provider (xai-oauth,
-    # qwen-oauth, etc.) via the dashboard's model picker — preserve that value
-    # so a container restart doesn't revert it to "auto" and break their session.
-    if any(data.get(k) for k in PROVIDER_KEYS):
-        merged_model["provider"] = "auto"
+    if reset_model:
+        # Config reset: wipe the model block to a clean slate. Preserving the old
+        # provider/base_url here would leave stale routing behind (e.g. a lingering
+        # `base_url: https://openrouter.ai/api/v1` that misroutes the next provider
+        # the user configures). Everything else — hermes tuning defaults,
+        # mcp_servers — is still deep-merged through untouched below.
+        merged_model = {"default": ""}
+    else:
+        merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
+        merged_model["default"] = model
+        # Only force provider="auto" when a known API key is configured. If no
+        # API key is set, the user likely configured an OAuth provider (xai-oauth,
+        # qwen-oauth, etc.) via the dashboard's model picker — preserve that value
+        # so a container restart doesn't revert it to "auto" and break their session.
+        if any(data.get(k) for k in PROVIDER_KEYS):
+            merged_model["provider"] = "auto"
+            # A known built-in provider (openrouter, minimax, nvidia, …) resolves
+            # its endpoint + credentials from the provider itself, so any inline
+            # model.base_url/api_key/api_mode is stale. base_url "takes precedence
+            # over provider" upstream (hermes_cli/config.py), so a leftover — e.g.
+            # a former `base_url: https://openrouter.ai/api/v1` from the hermes
+            # dashboard — silently misroutes EVERY provider you later switch to
+            # (all calls forced to that endpoint regardless of the active model).
+            # Strip them here on the provider-save path, mirroring hermes' own
+            # clear_model_endpoint_credentials() on a switch-away-from-custom. Our
+            # own custom-endpoint flow is unaffected: it lives in the separate
+            # custom_providers[] block below, never in model.base_url.
+            for _stale in ("base_url", "api_key", "api", "api_mode"):
+                merged_model.pop(_stale, None)
     merged["model"] = merged_model
 
     merged_terminal = dict(merged.get("terminal") if isinstance(merged.get("terminal"), dict) else {})
@@ -1088,7 +1140,7 @@ async def api_config_reset(request: Request):
     async with cfg_lock:
         if ENV_FILE.exists():
             ENV_FILE.unlink()
-        write_config_yaml({})
+        write_config_yaml({}, reset_model=True)
     return JSONResponse({"ok": True})
 
 
