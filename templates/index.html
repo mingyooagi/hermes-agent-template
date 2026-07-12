@@ -977,7 +977,7 @@
         <!-- Messaging Channels -->
         <div class="section-label">
           Messaging Channels
-          <span class="req-note">— at least one required</span>
+          <span class="req-note">— optional</span>
         </div>
         <div class="card" style="padding: 0 16px;">
 
@@ -1329,7 +1329,7 @@
             Connect a Messaging Platform
           </div>
           <p style="font-size:13px;color:var(--text-dim);margin-bottom:14px;">
-            Hermes Agent works through messaging platforms. You need to connect at least one. The easiest to set up is <strong style="color:var(--text);">Telegram</strong>.
+            Hermes Agent can work through messaging platforms. Connecting one is optional — the easiest to set up is <strong style="color:var(--text);">Telegram</strong>.
           </p>
           <ol class="step-list">
             <li>
@@ -1644,10 +1644,21 @@ function app() {
         const r = await fetch('/setup/api/config', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ vars: { ...this.vars }, _restart: this.restartOnSave }),
+          body: JSON.stringify({
+            vars: { ...this.vars },
+            _restart: this.restartOnSave,
+            // Tells the backend which provider's key/model pair this save
+            // action just edited, so it can pin config.yaml's model.provider
+            // to that exact provider (via hermes' own POST /api/model/set)
+            // instead of leaving it on "auto" — which becomes ambiguous as
+            // soon as a second provider key exists. Empty when the user
+            // saved without touching a provider (e.g. just a channel toggle).
+            _active_provider_key: (p && p.key) ? p.key : '',
+          }),
         });
         if (r.ok) {
-          this.notify('Saved', true);
+          const d = await r.json().catch(() => ({}));
+          this.notify(d && d.warning ? `Saved, but: ${d.warning}` : 'Saved', !(d && d.warning));
           this.selectedProvider = '';
           await this.loadConfig();
         } else { const e = await r.json().catch(()=>{}); this.notify(e?.error||'Save failed', false); }
